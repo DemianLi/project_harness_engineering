@@ -2,7 +2,7 @@
 
 This document is the **decisions log** for turning the six-layer harness research (`docs/research/factory-agent-harness-l1` through `l6`) and the Pydantic AI v2 technical evaluation (`docs/research/pydantic-ai-evaluation.md`, `docs/research/pydantic-ai-l1-l6-implementation-mapping.md`) into an actual product spec. Where the research docs survey *what capabilities exist across platforms*, this document records *the specific choice made for this product*.
 
-Status: living document, updated as each open question below is resolved. Not yet a complete spec — see "Pending prerequisites" for what still blocks full spec sign-off.
+Status: living document. All items from the original gap checklist have now been walked through and resolved, **except** the three prerequisites in §5 (5.1/5.2/5.3), which require input from stakeholders outside the engineering team (plant/safety engineering, legal/compliance) and cannot be resolved by further clarification alone. Those three items are what block full spec sign-off.
 
 ---
 
@@ -82,17 +82,38 @@ These items cannot be resolved by the engineering/harness-design team alone. The
 
 ---
 
-## 7. Open items (not yet discussed — carried forward from the original gap checklist)
+## 7. Delivery and operational decisions (resolved)
 
-The following 🟢 items from the original gap analysis have not yet been resolved and are carried forward to the next round of clarification:
+**7.1 — UI/UX.** The chat interface will be **embedded into the factory's existing operational dashboard**, not built as a standalone app. Reduces context-switching cost for operators and keeps the agent inside the environment they already work in, especially important during a crisis.
 
-- UI/UX design
-- Testing/red-team strategy
-- CI/CD and rollout plan
-- Team ownership and ongoing model/framework upgrade responsibility
-- Legal/compliance standard applicability (confirm which industrial safety/cybersecurity standards, if any, apply to this deployment and jurisdiction — not yet verified)
-- Specific local model choice and hardware sizing (follow-up to §2)
-- SCADA/historian vendor, schema, and connection protocol specifics (follow-up to §3)
+**7.2 — Testing / red-team strategy.** Split into two tracks:
+- The approval mechanism (§4's read/write rule) is pure engineering logic and can be unit-tested now, independent of the §5 prerequisites.
+- Validating crisis-diagnosis logic against realistic scenarios is merged into the §5.1/5.2 prerequisite workstream: when interviewing plant/safety engineering for the asset register and incident classification standard, also collect 3-5 representative real past incidents (spanning different severity levels) to use as a simulated-replay test set.
+
+**7.3 — CI/CD and rollout plan.** Phased rollout:
+1. **Phase 1**: ship read-only capabilities only (status queries, historical data lookups) — does not depend on §5's prerequisites, can ship first.
+2. **Phase 2**: enable crisis-diagnosis suggestions once §5.1/5.2 land, but every action remains subject to the human-approval rule in §4.
+3. **Phase 3**: after a production track record accumulates sufficient accuracy data, revisit whether any low-risk actions can be granted autonomous execution.
+
+**7.4 — Team ownership.** Initial candidates for harness engineering, Pydantic AI upgrade decisions, and crisis-logic safety sign-off have been identified (not detailed in this doc). Safety sign-off should be held by the same plant/safety engineering stakeholders consulted in §5.1/5.2, to avoid the engineering team reviewing its own implementation against a standard it also wrote.
+
+**7.5 — Legal/compliance standard applicability.** Not resolved by this team — flagged as a reminder; the organization's legal/compliance team will determine which industrial safety/cybersecurity standards apply to this deployment's industry and jurisdiction.
+
+**7.6 — Local model and hardware.** Two open-weights candidates were checked against the tool-calling/reasoning needs of this use case (diagnostic reasoning combined with tool calls to query telemetry and gate approvals, not pure tool-calling alone):
+- Llama-3-Groq-8B-Tool-Use (Groq/Glaive, built on Meta Llama 3 8B) — purpose-built for tool calling (89.06% on BFCL, best among open 8B models at time of publishing), runs in 6-8GB VRAM at 4-bit, but narrowly optimized for tool use at the expense of general reasoning depth.
+- **Mistral NeMo 12B (Mistral AI) — selected.** Native function-calling support with more balanced general reasoning capability, ~12GB VRAM. Chosen over the 8B tool-use-specialized option because this use case needs diagnostic reasoning alongside tool calls, not tool-calling accuracy alone.
+- Note: Gemma 4 12B (considered earlier) was found to have comparatively weaker tool-calling support versus Llama/Mistral-family models — a relevant factor given this harness's reliance on tool calls for telemetry access and approval gating.
+- Exact hardware sizing (GPU model/count) for serving Mistral NeMo 12B at the required latency/concurrency (§6.3) is a follow-up integration detail, not yet benchmarked on-site.
+
+---
+
+## 8. Remaining pending work
+
+Everything from the original gap checklist has been resolved except:
+
+- **§5.1 / §5.2 / §5.3** — the three prerequisites requiring plant/safety engineering and legal/compliance input (see §5). These block final sign-off on L1/L4/L5/L6 design and on the Phase 2/3 rollout in §7.3.
+- **SCADA/historian vendor, schema, and connection protocol specifics** (follow-up to §3) — does not block spec-level decisions, resolve during integration.
+- **On-site hardware sizing for Mistral NeMo 12B** (follow-up to §7.6) — benchmark once hardware is available.
 
 ---
 
