@@ -23,11 +23,9 @@ This statement exists specifically so that engineering staff reading this spec d
 Implications:
 - The agent must run on a **locally deployed, open-weights model**, not a cloud-hosted model (OpenAI/Anthropic/Google APIs are not reachable).
 - Pydantic AI v2 remains the correct framework choice — it natively supports local model serving via Ollama/LiteLLM (verified in `docs/research/pydantic-ai-evaluation.md`, §5).
-- Cloud-dependent components identified in the Pydantic AI mapping must be replaced with self-hosted equivalents:
-  - Pydantic Logfire (cloud observability) → self-hosted OpenTelemetry collector/backend.
-  - Any cloud vector store for RAG → on-prem/local vector store.
-- Local open-weights models generally have lower reasoning capability than top cloud models (Claude/GPT/Gemini-class). This sets an upper bound on diagnostic reliability that must be reflected in the L5 evaluation criteria (still pending — see §6) and in how much autonomy the agent is given (reinforces the conservative default in §4).
-- Hardware requirement: on-site GPU capacity sufficient to serve the chosen local model. Specific model choice and hardware sizing are a follow-up technical decision, not yet made.
+- Cloud-dependent components identified in the Pydantic AI mapping are replaced with self-hosted equivalents — see §7.7 for the specific products selected (serving engine, vector store, observability backend, embedding model).
+- Local open-weights models generally have lower reasoning capability than top cloud models (Claude/GPT/Gemini-class). This sets an upper bound on diagnostic reliability that must be reflected in the L5 evaluation criteria (still pending — see §5.2) and in how much autonomy the agent is given (reinforces the conservative default in §4).
+- Hardware requirement: on-site GPU capacity sufficient to serve the chosen local model (Mistral NeMo 12B, §7.6) plus the embedding model (§7.7). Exact sizing not yet benchmarked (see §8).
 
 ---
 
@@ -48,6 +46,7 @@ Implications:
 
 - Maps directly to Pydantic AI's `requires_approval=True` parameter (on `@agent.tool`, `Tool()`, or `FunctionToolset`) plus `HandleDeferredToolCalls` for the approval-handling flow (per `docs/research/pydantic-ai-l1-l6-implementation-mapping.md`, L2/L6 sections).
 - This is a **read/write classification**, not a full severity-based hard-constraint list. It is a safe, conservative interim rule that lets tool-layer (L2) design proceed now, without waiting for the full incident-classification work in §6. It will likely be refined (e.g., some read-only actions may still warrant approval in certain crisis classifications) once that work lands — this rule is a floor, not the final policy.
+- **Idempotency requirement (L6).** Pydantic AI has no built-in idempotent-key mechanism (per the mapping doc's L6 section) — a duplicate approval submission (e.g., a network retry re-firing the same approved tool call) must not execute a state-changing action twice. Every state-changing tool must check current equipment state before executing and no-op if the target state is already reached (e.g., a "close valve" tool checks the valve isn't already closed), rather than blindly re-executing. This is a general engineering requirement, not dependent on §5's prerequisites, and should be enforced at tool-implementation time for every state-changing tool defined under this policy.
 
 ---
 
@@ -61,7 +60,9 @@ These items cannot be resolved by the engineering/harness-design team alone. The
 
 **5.3 — AI conversation log retention/access policy.** The factory's existing data governance rules are assumed to cover sensor/operational data generally (see §7 below), but AI conversation logs are a new data type those rules likely don't address. Needed: how long conversation logs (including approval decisions made through the chat) are retained, and who is authorized to review them. Flagged for later resolution; not yet defined.
 
-**Action**: schedule interviews with plant operations / safety engineering to produce the 5.1/5.2 documents, and separately define the 5.3 policy (does not require the same stakeholders as 5.1/5.2). Until delivered, L1/L4/L5/L6 design can proceed on the interim decisions above, but final sign-off on those layers is blocked on this workstream.
+**5.4 — Compensating actions for failed or partial state-changing operations.** Pydantic AI has no built-in rollback/saga mechanism (per the mapping doc's L6 section) — if an approved action (e.g., equipment shutdown, valve close) fails partway through execution, what the correct corrective action is (retry, a specific undo procedure, or an operator alert with no automated undo) is domain safety knowledge, not something engineering can decide alone. Needed: for each state-changing action category in the eventual §5.1 asset register, a definition of its failure-recovery procedure. Until delivered, the interim rule is **fail-safe, not fail-silent**: any partial-execution failure surfaces immediately to the approving user as an explicit alert rather than being retried automatically or silently swallowed.
+
+**Action**: schedule interviews with plant operations / safety engineering to produce the 5.1/5.2/5.4 documents (5.4's per-action failure-recovery procedures share the same interview and can be collected alongside 5.1/5.2), and separately define the 5.3 policy (does not require the same stakeholders). Until delivered, L1/L4/L5/L6 design can proceed on the interim decisions above, but final sign-off on those layers is blocked on this workstream.
 
 ---
 
@@ -105,15 +106,35 @@ These items cannot be resolved by the engineering/harness-design team alone. The
 - Note: Gemma 4 12B (considered earlier) was found to have comparatively weaker tool-calling support versus Llama/Mistral-family models — a relevant factor given this harness's reliance on tool calls for telemetry access and approval gating.
 - Exact hardware sizing (GPU model/count) for serving Mistral NeMo 12B at the required latency/concurrency (§6.3) is a follow-up integration detail, not yet benchmarked on-site.
 
+**7.7 — Serving engine and supporting infrastructure.**
+
+- **Model-serving engine: vLLM (selected over Ollama).** Decision criterion: choose vLLM when sustained concurrent users exceed ~4, a multi-GPU setup is in play, or p99 latency guarantees are needed; choose Ollama for single-user/no-concurrency scenarios. Per §6.3's confirmed concurrency (~10 users, above the 4-user threshold), this criterion resolves to vLLM — published 2026 benchmarks show vLLM sustaining roughly 6x the throughput of Ollama at 50 concurrent users with p99 latency under 3 seconds, versus Ollama's p99 climbing to ~24.7 seconds under the same load (Ollama's continuous-batching absence causes tail latency to degrade sharply under concurrency; vLLM's PagedAttention/continuous-batching design does not).
+- **Observability: self-hosted OTel stack (OTel Collector → Tempo/Prometheus/Loki → Grafana), replacing the Pydantic Logfire SaaS path noted in §2.** Per the mapping doc's L5 section, Logfire is itself "an opinionated wrapper around OpenTelemetry" and Pydantic AI's own OTel instrumentation can export to any OTel-compatible backend — so the substitution is standard OTel export, not a Logfire-specific workaround. Note **Grafana alone is a visualization layer, not a trace/metrics store**: traces need a store such as Tempo (or Jaeger), metrics need Prometheus (or Mimir), logs need Loki, with Grafana as the shared dashboard on top. "Grafana" was previously used loosely to refer to this whole stack; naming the storage components here avoids that ambiguity reaching whoever provisions the infrastructure.
+- **Vector store (Qdrant) and embedding model (Jina-embeddings-v3) — provisional, conditional on §5.1/§5.2 document shape.** These are not committed infrastructure; they are the fallback tier if semantic retrieval turns out to be necessary. The retrieval architecture for this harness is a three-tier escalation, cheapest first, and each of the three core interaction types resolves to a different tier:
+  - **Tier 1 — structured data, no retrieval infrastructure at all.** Equipment-state queries ("what does sensor X currently read?") are answered by §3's SCADA/historian tool-function lookups. This was already decided and does not involve embeddings.
+  - **Tier 2 — deterministic keyed lookup.** If §5.1's asset register and §5.2's incident classification standard turn out to be finite, enumerable tables (e.g., a bounded set of equipment types each with known fault signatures; a bounded set of severity tiers each with fixed response steps), then anomaly diagnosis and crisis-SOP recommendation should be served from a structured lookup table (a regular DB table or even data injected directly into the system prompt/tool return) — **not** semantic search. For a crisis-handling harness this is not merely simpler than RAG, it is safer: a keyed lookup is auditable (the exact rule that fired for a given input can be proven) and exhaustively testable (a finite table can be tested case-by-case), whereas semantic retrieval carries irreducible mis-retrieval and chunking risk. This is consistent with L3's preference for deterministic slot-filling and L6's preference for hard constraints over probabilistic judgment on safety-relevant paths.
+  - **Tier 3 — semantic retrieval (Qdrant + Jina-embeddings-v3).** Only justified if §5.1/§5.2 instead produce large, non-enumerable free-text corpora (e.g., hundreds of pages of maintenance manuals or incident narratives that cannot be reduced to a lookup table). Vendor selection below is preserved for if/when this tier is needed, but **no vector-store or embedding-model infrastructure should be built until §5.1/§5.2 deliverables confirm the documents are actually unstructured enough to require it.**
+  - Vendor selection (if Tier 3 is triggered): Jina-embeddings-v3 (Jina AI, Germany), selected over two alternatives after confirming the document corpus will be Chinese and English only:
+    - NV-Embed-v2 (NVIDIA) — ruled out: 7B parameters, ~24GB VRAM unquantized, impractical alongside the ~12GB already committed to Mistral NeMo 12B on a single-site GPU budget sized for 10 concurrent users.
+    - Nomic-embed-text-v2-moe (Nomic AI) — lighter (475M total/305M active parameters) and supports Chinese, but its 512-token max context is too short for chunking long procedural manuals/SOPs without excessive fragmentation.
+    - Jina-embeddings-v3 — 570M dense parameters, 8192-token context (suits long procedural documents), and Chinese is one of its ~30 languages with dedicated fine-tuning (out of 89 supported) — the best fit for this architecture's actual retrieval role, resource budget, and document corpus, if Tier 3 is ever triggered.
+
+**7.8 — Execution orchestration engine (L3).** §1's v1 architecture commits to Reflexion-style generate→critique→improve and Blueprint/ReWoo-style plan→verify→execute patterns, but per the mapping doc's L3 section, **neither is a native Pydantic AI primitive** — both require hand-built orchestration on top of the framework.
+
+- **Decision: build on `pydantic-graph` (`GraphBuilder[StateT, DepsT, InputT, OutputT]`), not a hand-rolled loop over raw `message_history`.** It ships bundled with Pydantic AI, gives type-safe state shared via the same `RunContext`/`deps` pattern already used for L1 dependency injection, and supports conditional edges — which is what a critique/revise loop (Reflexion) and a plan→verify→execute sequence both need structurally. This keeps orchestration on the framework's own state-machine primitive rather than introducing a second, bespoke one.
+- Concretely: a plan-generation node, an execute node (invoking the agent's tools), a verify node, and — for Reflexion-style critique — a conditional edge back from verify to a critique/revise node when the check fails, with a max-iteration bound to prevent infinite critique loops.
+- This decision does not require §5's prerequisites and can proceed now; it is a pure engineering/framework choice.
+
 ---
 
 ## 8. Remaining pending work
 
 Everything from the original gap checklist has been resolved except:
 
-- **§5.1 / §5.2 / §5.3** — the three prerequisites requiring plant/safety engineering and legal/compliance input (see §5). These block final sign-off on L1/L4/L5/L6 design and on the Phase 2/3 rollout in §7.3.
+- **§5.1 / §5.2 / §5.3 / §5.4** — the four prerequisites requiring plant/safety engineering and legal/compliance input (see §5). These block final sign-off on L1/L4/L5/L6 design and on the Phase 2/3 rollout in §7.3. §5.1/5.2 now also decide the §7.7 retrieval tier: if the delivered asset register and incident classification standard are finite/enumerable, anomaly diagnosis and crisis-SOP recommendation should be served from structured lookup tables (Tier 2), and the Qdrant/Jina-embeddings-v3 stack (Tier 3) should not be built at all unless those deliverables turn out to be large, non-enumerable free text.
 - **SCADA/historian vendor, schema, and connection protocol specifics** (follow-up to §3) — does not block spec-level decisions, resolve during integration.
-- **On-site hardware sizing for Mistral NeMo 12B** (follow-up to §7.6) — benchmark once hardware is available.
+- **On-site hardware sizing for Mistral NeMo 12B served via vLLM, plus Qdrant/Jina-embeddings-v3 only if Tier 3 retrieval is triggered** (follow-up to §7.6/§7.7) — benchmark once hardware is available and once the Tier 2 vs. Tier 3 decision is made.
+- **Verify Pydantic AI's compatibility with vLLM specifically** (follow-up to §2/§7.7) — the framework's local-model support was verified against Ollama/LiteLLM in `docs/research/pydantic-ai-evaluation.md` §5; vLLM's OpenAI-compatible endpoint is expected to work the same way via `OpenAIChatModel` with a custom provider, but this specific pairing has not itself been confirmed against a primary source. Fold into the hardware-sizing benchmark above.
 
 ---
 
