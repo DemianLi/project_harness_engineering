@@ -23,11 +23,9 @@ This statement exists specifically so that engineering staff reading this spec d
 Implications:
 - The agent must run on a **locally deployed, open-weights model**, not a cloud-hosted model (OpenAI/Anthropic/Google APIs are not reachable).
 - Pydantic AI v2 remains the correct framework choice — it natively supports local model serving via Ollama/LiteLLM (verified in `docs/research/pydantic-ai-evaluation.md`, §5).
-- Cloud-dependent components identified in the Pydantic AI mapping must be replaced with self-hosted equivalents:
-  - Pydantic Logfire (cloud observability) → self-hosted OpenTelemetry collector/backend.
-  - Any cloud vector store for RAG → on-prem/local vector store.
-- Local open-weights models generally have lower reasoning capability than top cloud models (Claude/GPT/Gemini-class). This sets an upper bound on diagnostic reliability that must be reflected in the L5 evaluation criteria (still pending — see §6) and in how much autonomy the agent is given (reinforces the conservative default in §4).
-- Hardware requirement: on-site GPU capacity sufficient to serve the chosen local model. Specific model choice and hardware sizing are a follow-up technical decision, not yet made.
+- Cloud-dependent components identified in the Pydantic AI mapping are replaced with self-hosted equivalents — see §7.7 for the specific products selected (serving engine, vector store, observability backend, embedding model).
+- Local open-weights models generally have lower reasoning capability than top cloud models (Claude/GPT/Gemini-class). This sets an upper bound on diagnostic reliability that must be reflected in the L5 evaluation criteria (still pending — see §5.2) and in how much autonomy the agent is given (reinforces the conservative default in §4).
+- Hardware requirement: on-site GPU capacity sufficient to serve the chosen local model (Mistral NeMo 12B, §7.6) plus the embedding model (§7.7). Exact sizing not yet benchmarked (see §8).
 
 ---
 
@@ -105,6 +103,16 @@ These items cannot be resolved by the engineering/harness-design team alone. The
 - Note: Gemma 4 12B (considered earlier) was found to have comparatively weaker tool-calling support versus Llama/Mistral-family models — a relevant factor given this harness's reliance on tool calls for telemetry access and approval gating.
 - Exact hardware sizing (GPU model/count) for serving Mistral NeMo 12B at the required latency/concurrency (§6.3) is a follow-up integration detail, not yet benchmarked on-site.
 
+**7.7 — Serving engine and supporting infrastructure.**
+
+- **Model-serving engine: vLLM (selected over Ollama).** Decision criterion: choose vLLM when sustained concurrent users exceed ~4, a multi-GPU setup is in play, or p99 latency guarantees are needed; choose Ollama for single-user/no-concurrency scenarios. Per §6.3's confirmed concurrency (~10 users, above the 4-user threshold), this criterion resolves to vLLM — published 2026 benchmarks show vLLM sustaining roughly 6x the throughput of Ollama at 50 concurrent users with p99 latency under 3 seconds, versus Ollama's p99 climbing to ~24.7 seconds under the same load (Ollama's continuous-batching absence causes tail latency to degrade sharply under concurrency; vLLM's PagedAttention/continuous-batching design does not).
+- **Vector store: Qdrant.**
+- **Observability backend: Grafana** (self-hosted, replacing the cloud-only Pydantic Logfire path noted in §2).
+- **Embedding model: Jina-embeddings-v3 (Jina AI, Germany).** Used exclusively for semantic retrieval over unstructured factory documents (equipment manuals, maintenance procedures, and — once §5.1/5.2 land — historical incident reports and the incident classification SOP itself); real-time telemetry/equipment-state queries remain structured database lookups via §3's SCADA/historian integration and do not use embeddings at all. Selected over two alternatives after confirming the document corpus will be Chinese and English only:
+  - NV-Embed-v2 (NVIDIA) — ruled out: 7B parameters, ~24GB VRAM unquantized, impractical alongside the ~12GB already committed to Mistral NeMo 12B on a single-site GPU budget sized for 10 concurrent users.
+  - Nomic-embed-text-v2-moe (Nomic AI) — lighter (475M total/305M active parameters) and supports Chinese, but its 512-token max context is too short for chunking long procedural manuals/SOPs without excessive fragmentation.
+  - Jina-embeddings-v3 — 570M dense parameters, 8192-token context (suits long procedural documents), and Chinese is one of its ~30 languages with dedicated fine-tuning (out of 89 supported) — the best fit for this architecture's actual retrieval role, resource budget, and document corpus.
+
 ---
 
 ## 8. Remaining pending work
@@ -113,7 +121,7 @@ Everything from the original gap checklist has been resolved except:
 
 - **§5.1 / §5.2 / §5.3** — the three prerequisites requiring plant/safety engineering and legal/compliance input (see §5). These block final sign-off on L1/L4/L5/L6 design and on the Phase 2/3 rollout in §7.3.
 - **SCADA/historian vendor, schema, and connection protocol specifics** (follow-up to §3) — does not block spec-level decisions, resolve during integration.
-- **On-site hardware sizing for Mistral NeMo 12B** (follow-up to §7.6) — benchmark once hardware is available.
+- **On-site hardware sizing for Mistral NeMo 12B + Jina-embeddings-v3 served via vLLM** (follow-up to §7.6/§7.7) — benchmark once hardware is available.
 
 ---
 
